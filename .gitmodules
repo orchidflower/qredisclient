@@ -4,3 +4,6 @@
 [submodule "3rdparty/asyncfuture"]
 	path = 3rdparty/asyncfuture
 	url = https://github.com/benlau/asyncfuture.git
+[submodule "3rdparty/qsshclient"]
+	path = 3rdparty/qsshclient
+	url = https://github.com/uglide/qsshclient.git

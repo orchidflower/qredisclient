@@ -191,9 +191,16 @@ bool RedisClient::Connection::waitForIdle(uint timeout) {
   return waiter.wait();
 }
 
-QSharedPointer<RedisClient::Connection> RedisClient::Connection::clone() const {
-  return QSharedPointer<RedisClient::Connection>(
+QSharedPointer<RedisClient::Connection> RedisClient::Connection::clone(bool copyServerInfo) const {
+  auto newConnection = QSharedPointer<RedisClient::Connection>(
       new RedisClient::Connection(getConfig()));
+
+  if (copyServerInfo)
+    newConnection->m_serverInfo = m_serverInfo;
+
+  newConnection->m_currentMode = m_currentMode;
+
+  return newConnection;
 }
 
 void RedisClient::Connection::retrieveCollection(
@@ -546,14 +553,43 @@ void RedisClient::Connection::callAfterConnect(
                    [callback, context](const QString &err) {
                      callback(err);
                      context->deleteLater();
-                   });
+  });
+}
+
+void RedisClient::Connection::sentinelConnectToMaster() {
+  Response mastersResult = internalCommandSync({"SENTINEL", "masters"});
+
+  if (!mastersResult.isArray()) {
+    emit error(
+        QString("Connection error: cannot retrive master node from sentinel"));
+    return;
+  }
+
+  QVariantList result = mastersResult.value().toList();
+
+  if (result.size() == 0) {
+    emit error(QString("Connection error: invalid response from sentinel"));
+    return;
+  }
+
+  QStringList masterInfo = result.at(0).toStringList();
+
+  if (masterInfo.size() < 6) {
+    emit error(QString("Connection error: invalid response from sentinel"));
+    return;
+  }
+
+  QString host = masterInfo[3];
+
+  if (!m_config.useSshTunnel() && (host == "127.0.0.1" || host == "localhost"))
+    host = m_config.host();
+
+  emit reconnectTo(host, masterInfo[5].toInt());
 }
 
 RedisClient::Connection::HostList RedisClient::Connection::getMasterNodes() {
-  HostList result;
-
   if (mode() != Mode::Cluster) {
-    return result;
+    return HostList();
   }
 
   Response r;
@@ -562,10 +598,12 @@ RedisClient::Connection::HostList RedisClient::Connection::getMasterNodes() {
     r = internalCommandSync({"CLUSTER", "SLOTS"});
   } catch (const Exception &e) {
     emit error(QString("Cannot retrive nodes list").arg(e.what()));
-    return result;
+    return HostList();
   }
 
   QVariantList slotsList = r.value().toList();
+
+  QSet<Host> masterNodes;
 
   foreach (QVariant clusterSlot, slotsList) {
     QVariantList details = clusterSlot.toList();
@@ -574,10 +612,10 @@ RedisClient::Connection::HostList RedisClient::Connection::getMasterNodes() {
 
     QVariantList masterDetails = details[2].toList();
 
-    result.append({masterDetails[0].toString(), masterDetails[1].toInt()});
+    masterNodes.insert({masterDetails[0].toString(), masterDetails[1].toInt()});
   }
 
-  return result;
+  return masterNodes.values();
 }
 
 QFuture<bool> RedisClient::Connection::isCommandSupported(
@@ -598,11 +636,19 @@ QFuture<bool> RedisClient::Connection::isCommandSupported(
 }
 
 void RedisClient::Connection::auth() {
-  emit log("AUTH");
-
   try {
     if (m_config.useAuth()) {
       internalCommandSync({"AUTH", m_config.auth().toUtf8()});
+    }
+
+    bool connectionWithPopulatedServerInfo =
+        (m_serverInfo.parsed.size() > 0 &&
+         (m_currentMode == Mode::Cluster || m_currentMode == Mode::Normal));
+
+    if (connectionWithPopulatedServerInfo) {
+      emit authOk();
+      emit connected();
+      return;
     }
 
     Response testResult = internalCommandSync({"PING"});
@@ -622,40 +668,9 @@ void RedisClient::Connection::auth() {
     } else if (m_serverInfo.sentinelMode) {
       m_currentMode = Mode::Sentinel;
       emit log("Sentinel detected. Requesting master node...");
-
-      Response mastersResult = internalCommandSync({"SENTINEL", "masters"});
-
-      if (!mastersResult.isArray()) {
-        emit error(QString(
-            "Connection error: cannot retrive master node from sentinel"));
-        return;
-      }
-
-      QVariantList result = mastersResult.value().toList();
-
-      if (result.size() == 0) {
-        emit error(QString("Connection error: invalid response from sentinel"));
-        return;
-      }
-
-      QStringList masterInfo = result.at(0).toStringList();
-
-      if (masterInfo.size() < 6) {
-        emit error(QString("Connection error: invalid response from sentinel"));
-        return;
-      }
-
-      QString host = masterInfo[3];
-
-      if (!m_config.useSshTunnel() &&
-          (host == "127.0.0.1" || host == "localhost"))
-        host = m_config.host();
-
-      emit reconnectTo(host, masterInfo[5].toInt());
-      return;
+      return sentinelConnectToMaster();
     }
 
-    emit log("Connected");
     emit authOk();
     emit connected();
   } catch (const Exception &e) {

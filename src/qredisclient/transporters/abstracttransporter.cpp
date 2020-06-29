@@ -1,5 +1,6 @@
 #include "abstracttransporter.h"
 #include <QDebug>
+#include <QDateTime>
 #include "qredisclient/connection.h"
 #include "qredisclient/private/responseemmiter.h"
 #include "qredisclient/utils/text.h"
@@ -55,7 +56,14 @@ void RedisClient::AbstractTransporter::addCommand(const Command &cmd) {
 void RedisClient::AbstractTransporter::cancelCommands(QObject *owner) {
   if (!owner) return;
 
-  reAddRunningCommandToQueue(owner);
+  // Cancel running commands
+  for (auto curr = m_runningCommands.begin(); curr != m_runningCommands.end();) {
+    if ((*curr)->cmd.getOwner() == owner) {
+      curr = m_runningCommands.erase(curr);
+    } else {
+      ++curr;
+    }
+  }
 
   // Remove subscriptions
   Subscriptions::iterator i = m_subscriptions.begin();
@@ -111,6 +119,12 @@ void RedisClient::AbstractTransporter::sendResponse(
 
   auto runningCommand = m_runningCommands.dequeue();
 
+  // Re-try on protocol errors
+  if (response.isProtocolErrorMessage()) {
+      m_commands.prepend(runningCommand->cmd);
+      return;
+  }
+
   // Reconnect to different server in cluster and reissue current
   // command if needed
   if (m_connection->mode() == Connection::Mode::Cluster &&
@@ -146,24 +160,22 @@ void RedisClient::AbstractTransporter::resetDbIndex() {
   m_connection->changeCurrentDbNumber(0);
 }
 
-void RedisClient::AbstractTransporter::reAddRunningCommandToQueue(
-    QObject *ignoreOwner) {
-  for (auto curr = m_runningCommands.end();
-       curr != m_runningCommands.begin();) {
-    --curr;
+void RedisClient::AbstractTransporter::reAddRunningCommandToQueue() {
+  qDebug() << "Running commands: " << m_runningCommands.size();
 
-    auto rCmd = *curr;
-    if (ignoreOwner == nullptr || rCmd->cmd.getOwner() != ignoreOwner) {
-      m_commands.prepend(rCmd->cmd);
-      qDebug() << "Running command was re-added to queue";
-      emit logEvent("Running command was re-added to queue.");
-    }
-
-    curr = m_runningCommands.erase(curr);
+  for (auto curr : m_runningCommands) {
+    m_commands.prepend(curr->cmd);
   }
+  m_runningCommands.clear();
+
+  qDebug() << "Running commands were re-added to queue";
+  emit logEvent("Running commands were re-added to queue.");
 }
 
 void RedisClient::AbstractTransporter::cancelRunningCommands() {
+  if (m_runningCommands.size() == 0)
+    return;
+
   emit logEvent("Cancel running commands");
   m_runningCommands.clear();
 }
@@ -266,6 +278,7 @@ void RedisClient::AbstractTransporter::readyRead() {
 
   if (!m_parser.feedBuffer(readFromSocket())) {
     // TODO: reset???!
+    qDebug() << "Cannot feed parsing buffer";
     return;
   }
 
@@ -287,11 +300,10 @@ void RedisClient::AbstractTransporter::runCommand(
     const RedisClient::Command &command) {
   if (isSocketReconnectRequired()) {
     if (!m_reconnectEnabled) {
-      qDebug() << "Connection disconnected on error. Ignoring commands.";
+      emit errorOccurred("Cannot run command. Reconnect is required.");
       return;
     }
-    qDebug() << "Cannot run command. Reconnect is required.";
-    m_commands.enqueue(command);
+    m_commands.prepend(command);
     reconnect();
     return;
   }
@@ -310,7 +322,7 @@ void RedisClient::AbstractTransporter::runCommand(
 
 RedisClient::AbstractTransporter::RunningCommand::RunningCommand(
     const RedisClient::Command &cmd)
-    : cmd(cmd), emitter(nullptr) {
+    : cmd(cmd), emitter(nullptr), sentAt(QDateTime::currentMSecsSinceEpoch()) {
   auto callback = cmd.getCallBack();
   auto owner = cmd.getOwner();
   if (callback && owner) {

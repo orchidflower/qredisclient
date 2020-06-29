@@ -317,7 +317,7 @@ class Connection : public QObject {
    * @brief create new connection object with same settings
    * @return
    */
-  virtual QSharedPointer<Connection> clone() const;
+  virtual QSharedPointer<Connection> clone(bool copyServerInfo=true) const;
 
   /*
    * Low level functions for modification
@@ -357,6 +357,8 @@ class Connection : public QObject {
   bool hasNotVisitedClusterNodes() const;
 
   void callAfterConnect(std::function<void(const QString& err)> callback);
+
+  void sentinelConnectToMaster();
 
  protected slots:
   void auth();

@@ -64,9 +64,10 @@ class AbstractTransporter : public QObject {
     RunningCommand(const Command& cmd);
     Command cmd;
     QSharedPointer<ResponseEmitter> emitter;
+    qint64 sentAt;
   };
 
-  void reAddRunningCommandToQueue(QObject* ignoreOwner = nullptr);
+  void reAddRunningCommandToQueue();
 
  private:
   void logResponse(const Response& response);

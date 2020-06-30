@@ -17,6 +17,7 @@ namespace RedisClient {
     {
     public:
         SshTransporter(Connection *);
+        ~SshTransporter();
 
     public slots:
         void disconnectFromHost();
